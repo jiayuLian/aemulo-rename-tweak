@@ -1,0 +1,11 @@
+name: smoke
+on: workflow_dispatch
+jobs:
+  u:
+    runs-on: ubuntu-latest
+    steps:
+      - run: uname -a && clang --version | head -2
+  m:
+    runs-on: macos-14
+    steps:
+      - run: uname -a
