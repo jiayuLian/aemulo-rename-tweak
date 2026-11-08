@@ -1,0 +1,83 @@
+name: build-dylib
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          brew install ldid xz make || true
+
+      - name: Setup Theos
+        run: |
+          export THEOS="$RUNNER_TEMP/theos"
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+          echo "$THEOS/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: |
+          make clean || true
+          make FINALPACKAGE=1 ARCHS="arm64" 2>&1 | tail -80
+
+      - name: Collect and verify
+        run: |
+          set -e
+          mkdir -p out
+
+          # 排除 *.dSYM：dSYM/Contents/Resources/DWARF/<name>.dylib 同名但 filetype 是
+          # MH_DSYM(10)，误拷进去 TrollFools 会报 Unsupported Mach-O type。
+          BIN=""
+          for c in ".theos/obj/iphoneos.arm64/AemuloRename.dylib" \
+                   ".theos/obj/AemuloRename.dylib" \
+                   ".theos/obj/debug/AemuloRename.dylib"; do
+            if [ -f "$c" ]; then BIN="$c"; break; fi
+          done
+          if [ -z "$BIN" ]; then
+            BIN=$(find .theos -name '*.dSYM' -prune -o -type f -name 'AemuloRename.dylib' -print | head -1)
+          fi
+          echo "PICKED: $BIN"
+          test -n "$BIN"
+          cp "$BIN" out/AemuloRename.dylib
+
+          otool -hv out/AemuloRename.dylib
+          FT=$(otool -hv out/AemuloRename.dylib | tail -1 | awk '{print $5}')
+          echo "filetype = $FT"
+          if [ "$FT" != "DYLIB" ]; then
+            echo "FATAL: collected file is not MH_DYLIB (got $FT)"
+            exit 1
+          fi
+          lipo -info out/AemuloRename.dylib
+
+          echo "=== dependency check (must NOT contain substrate) ==="
+          otool -L out/AemuloRename.dylib
+          if otool -L out/AemuloRename.dylib | grep -Eqi 'substrate|ellekit'; then
+            echo "FATAL: dylib links a hooking runtime"
+            exit 1
+          fi
+          if nm -u out/AemuloRename.dylib | grep -Eq '_MSHook|_HBLog'; then
+            echo "FATAL: undefined substrate symbols"
+            exit 1
+          fi
+
+          echo "=== version marker ==="
+          if ! grep -aq "AG_VER_V1" out/AemuloRename.dylib; then
+            echo "FATAL: version marker AG_VER_V1 missing"
+            exit 1
+          fi
+          echo "OK: AG_VER_V1 present"
+
+          ldid -S out/AemuloRename.dylib
+          ls -la out/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AemuloRename
+          path: out/AemuloRename.dylib
